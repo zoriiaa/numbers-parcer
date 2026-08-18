@@ -3,3 +3,4 @@ uvicorn
 aiogram
 numbers-parser
 openpyxl
+rapidfuzz
