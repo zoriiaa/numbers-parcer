@@ -1,4 +1,5 @@
 fastapi
 uvicorn
-numbers-parser
 aiogram
+numbers-parser
+openpyxl
