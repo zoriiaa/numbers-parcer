@@ -18,6 +18,22 @@ from aiogram.types import (
 )
 from fastapi import FastAPI
 from numbers_parser import Document
+from openpyxl import load_workbook
+
+# Назви листів, які варто ігнорувати автоматично — типові "службові"
+# сторінки, які деякі конвертери .numbers → .xlsx додають самі
+# (звіт про конвертацію тощо). Якщо після завантаження побачиш в
+# /categories зайву назву, яку тут нема — просто допиши сюди.
+JUNK_SHEET_KEYWORDS = [
+    "summary",
+    "conversion",
+    "readme",
+    "report",
+    "info",
+    "звіт",
+    "підсумок",
+    "конвертац",
+]
 
 # ──────────────────────────────────────────────────────────────
 # Налаштування
@@ -167,6 +183,75 @@ def parse_numbers_file(path: str):
     return categories, all_products
 
 
+def is_junk_sheet(name: str) -> bool:
+    n = name.strip().lower()
+    return any(keyword in n for keyword in JUNK_SHEET_KEYWORDS)
+
+
+def parse_xlsx_file(path: str):
+    """Парсинг .xlsx (напр. конвертований з .numbers). Фотки навмисно
+    ігноруються — читаємо тільки текстові значення клітинок."""
+    wb = load_workbook(path, read_only=True, data_only=True)
+    all_products = []
+    categories = []
+
+    try:
+        for ws in wb.worksheets:
+            if is_junk_sheet(ws.title):
+                continue
+
+            rows = list(ws.iter_rows(values_only=True))
+            if len(rows) < 2:
+                continue
+
+            num_cols = max((len(r) for r in rows), default=0)
+            if num_cols < 3:
+                # Занадто мало колонок для товарної таблиці —
+                # найімовірніше службовий лист від конвертера.
+                continue
+
+            sheet_name = ws.title
+            categories.append(sheet_name)
+
+            for row_idx, row_values in enumerate(rows[1:], start=1):
+                if not any(row_values):
+                    continue
+
+                raw_sku = row_values[0] if len(row_values) > 0 else ""
+                raw_title = row_values[1] if len(row_values) > 1 else ""
+
+                sku = clean_sku(raw_sku)
+                title = (
+                    str(raw_title).strip() if raw_title is not None else ""
+                )
+
+                if not title or title.lower() in [
+                    "назва товару",
+                    "артикул",
+                    "назва",
+                    "none",
+                ]:
+                    continue
+
+                raw_count = row_values[-2] if len(row_values) >= 2 else 0
+                raw_price = row_values[-1] if len(row_values) >= 1 else 0
+
+                all_products.append(
+                    {
+                        "id": f"{sheet_name}_{row_idx}",
+                        "category": sheet_name,
+                        "sku": sku,
+                        "title": title,
+                        "count": clean_count(raw_count),
+                        "price": clean_price(raw_price),
+                    }
+                )
+    finally:
+        wb.close()
+
+    return categories, all_products
+
+
 def search_products(query: str):
     q = query.strip().lower()
     if not q:
@@ -201,7 +286,8 @@ router = Router()
 async def cmd_start(message: Message):
     await message.answer(
         "Привіт! 👋\n\n"
-        "Надішли мені <b>.numbers</b> файл з базою товарів — я його розберу.\n"
+        "Надішли мені <b>.numbers</b> або <b>.xlsx</b> файл з базою товарів "
+        "— я його розберу.\n"
         "Після цього просто пиши назву або артикул товару в чат, "
         "і я знайду все, що підходить.\n\n"
         "Коли треба оновити базу — тисни кнопку внизу або просто "
@@ -248,9 +334,14 @@ async def handle_update_button(message: Message):
 async def handle_document(message: Message):
     doc = message.document
     filename = doc.file_name or "data.numbers"
+    filename_lower = filename.lower()
 
-    if not filename.lower().endswith(".numbers"):
-        await message.answer("Приймаю тільки файли .numbers 🙂")
+    if filename_lower.endswith(".numbers"):
+        parse_fn = parse_numbers_file
+    elif filename_lower.endswith((".xlsx", ".xls")):
+        parse_fn = parse_xlsx_file
+    else:
+        await message.answer("Приймаю файли .numbers або .xlsx 🙂")
         return
 
     size_mb = (doc.file_size or 0) / (1024 * 1024)
@@ -269,10 +360,10 @@ async def handle_document(message: Message):
     try:
         await message.bot.download(doc, destination=str(temp_path))
 
-        # numbers_parser синхронний — виносимо в окремий потік, щоб не
+        # Парсинг синхронний — виносимо в окремий потік, щоб не
         # блокувати event loop і не заважати обробці інших повідомлень.
         categories, products = await asyncio.to_thread(
-            parse_numbers_file, str(temp_path)
+            parse_fn, str(temp_path)
         )
 
         old_total = len(DB["products"])
