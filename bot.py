@@ -19,6 +19,7 @@ from aiogram.types import (
 from fastapi import FastAPI
 from numbers_parser import Document
 from openpyxl import load_workbook
+from rapidfuzz import fuzz
 
 # Назви листів, які варто ігнорувати автоматично — типові "службові"
 # сторінки, які деякі конвертери .numbers → .xlsx додають самі
@@ -55,6 +56,7 @@ DB_FILE = DATA_DIR / "products.json"
 
 MAX_FILE_SIZE_MB = 20
 MAX_RESULTS = 25
+FUZZY_THRESHOLD = 75  # 0-100: наскільки схожим має бути слово, щоб зарахувати збіг
 
 UPDATE_BUTTON_TEXT = "🔄 Оновити базу товарів"
 
@@ -253,14 +255,49 @@ def parse_xlsx_file(path: str):
 
 
 def search_products(query: str):
-    q = query.strip().lower()
-    if not q:
+    # Пошук "по словах" з допуском на одруки: кожне слово запиту або
+    # точно входить у назву/артикул, або достатньо на нього схоже
+    # (rapidfuzz). Короткі слова (≤2 символи) шукаються тільки точним
+    # підрядком, щоб не ловити випадковий шум.
+    tokens = [t for t in re.split(r"\s+", query.strip().lower()) if t]
+    if not tokens:
         return []
-    results = []
+
+    scored = []
     for p in DB["products"]:
-        if q in p["title"].lower() or q in p["sku"].lower():
-            results.append(p)
-    return results
+        haystack = f"{p['title']} {p['sku']}".lower()
+        haystack_words = [w for w in re.split(r"[\s\-_/]+", haystack) if w]
+
+        token_scores = []
+        matched_all = True
+
+        for tok in tokens:
+            if len(tok) <= 2:
+                if not any(tok in w for w in haystack_words):
+                    matched_all = False
+                    break
+                token_scores.append(100)
+                continue
+
+            best = 0
+            for w in haystack_words:
+                if tok in w:
+                    best = 100
+                    break
+                best = max(best, fuzz.ratio(tok, w))
+
+            if best < FUZZY_THRESHOLD:
+                matched_all = False
+                break
+            token_scores.append(best)
+
+        if matched_all:
+            avg_score = sum(token_scores) / len(token_scores)
+            scored.append((avg_score, p))
+
+    # Найточніші збіги — першими
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in scored]
 
 
 def format_product(p: dict) -> str:
