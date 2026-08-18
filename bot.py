@@ -105,13 +105,29 @@ def clean_sku(val):
     return s
 
 
-def clean_price(val):
+def parse_price_field(val):
+    """Розбирає поле ціни, яке може бути звичайним числом, або текстом
+    на кшталт 'SALE 1999,99' (кома замість крапки, зайве слово поряд).
+    Повертає (число_ціни, текстова_мітка_або_None)."""
     if val is None or val == "":
-        return 0.0
+        return 0.0, None
+
+    if isinstance(val, (int, float)):
+        return round(float(val), 2), None
+
+    s = str(val).strip()
+    match = re.search(r"\d+(?:[.,]\d+)?", s)
+    if not match:
+        return 0.0, None
+
+    num_str = match.group(0).replace(",", ".")
     try:
-        return round(float(val), 2)
+        price = round(float(num_str), 2)
     except (ValueError, TypeError):
-        return 0.0
+        price = 0.0
+
+    label = (s[: match.start()] + s[match.end() :]).strip(" -–—:") or None
+    return price, label
 
 
 def clean_count(val):
@@ -169,6 +185,7 @@ def parse_numbers_file(path: str):
 
                 raw_count = row_values[-2] if len(row_values) >= 2 else 0
                 raw_price = row_values[-1] if len(row_values) >= 1 else 0
+                price, price_label = parse_price_field(raw_price)
 
                 all_products.append(
                     {
@@ -177,7 +194,8 @@ def parse_numbers_file(path: str):
                         "sku": sku,
                         "title": title,
                         "count": clean_count(raw_count),
-                        "price": clean_price(raw_price),
+                        "price": price,
+                        "price_label": price_label,
                     }
                 )
 
@@ -237,6 +255,7 @@ def parse_xlsx_file(path: str):
 
                 raw_count = row_values[-2] if len(row_values) >= 2 else 0
                 raw_price = row_values[-1] if len(row_values) >= 1 else 0
+                price, price_label = parse_price_field(raw_price)
 
                 all_products.append(
                     {
@@ -245,7 +264,8 @@ def parse_xlsx_file(path: str):
                         "sku": sku,
                         "title": title,
                         "count": clean_count(raw_count),
-                        "price": clean_price(raw_price),
+                        "price": price,
+                        "price_label": price_label,
                     }
                 )
     finally:
@@ -303,6 +323,8 @@ def search_products(query: str):
 def format_product(p: dict) -> str:
     availability = f"{p['count']} шт" if p["count"] > 0 else "немає в наявності"
     price = f"{p['price']:.0f} ₴" if p["price"] else "—"
+    if p.get("price_label"):
+        price += f" ({p['price_label']})"
     return (
         f"📦 <b>{p['title']}</b>\n"
         f"Арт: <code>{p['sku'] or '—'}</code>\n"
